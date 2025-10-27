@@ -1,0 +1,20 @@
+asset: "BTC"
+frequency: "D"        # D=Daily, H=Hourly
+price_source: "coingecko"
+onchain_source: "bigquery"  # or "etherscan", "kaggle", "blockchair"
+window: "1D"
+graph:
+  min_tx_value_usd: 0.0
+  sliding_aggregate_days: 1
+features:
+  top_k_degree_pct: 1
+model:
+  garch:
+    dist: "studentt"
+  garchx:
+    lag_k: 1
+backtest:
+  start: "2019-01-01"
+  end: "2025-01-01"
+  walk: "expanding"
+  test_horizon: 1

@@ -1,0 +1,15 @@
+pandas
+numpy
+scipy
+matplotlib
+networkx
+python-dateutil
+pyyaml
+requests
+tqdm
+statsmodels
+arch
+scikit-learn
+xgboost
+lightgbm
+jupyter
