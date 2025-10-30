@@ -1,10 +1,8 @@
 #!/usr/bin/env Rscript
-# True joint-MLE GARCHX using rugarch
-# - Reads your existing CSVs
-# - Aligns & lags ETH features (causal)
-# - Fits GARCH(1,1) and GARCHX jointly
-# - Compares QLIKE (lower = better)
-# - Writes results to data/processed/
+# True joint-MLE GARCHX using rugarch (Single aligned CSV version)
+# ---------------------------------------------------------------
+# Expects: data/processed/aligned_returns_features.csv
+# Columns: timestamp, price, ret, n_nodes, n_edges, total_volume, avg_degree, avg_clustering
 
 suppressPackageStartupMessages({
   req <- c("rugarch", "data.table")
@@ -14,73 +12,37 @@ suppressPackageStartupMessages({
 })
 
 PRO <- "data/processed"
+path <- file.path(PRO, "aligned_returns_features.csv")
 
-# ---------- Helpers ----------
-qlike <- function(realized_var, pred_var, eps = 1e-12) {
-  rv <- pmax(realized_var, eps)
-  pv <- pmax(pred_var, eps)
-  mean(rv / pv - log(rv / pv) - 1)
+if (!file.exists(path)) stop("Missing input file: ", path)
+
+# ---------- Load & prepare ----------
+dt <- fread(path)
+if (!"timestamp" %in% names(dt)) {
+  setnames(dt, names(dt)[1], "timestamp")
 }
+dt[, timestamp := as.IDate(timestamp)]
+setorder(dt, timestamp)
 
-# Robust CSV reader that works whether date is a column or the index
-read_returns <- function(path) {
-  dt <- fread(path)
-  # Expect columns: timestamp, price (optional), ret
-  if (!"timestamp" %in% names(dt)) {
-    # first column is likely the timestamp index
-    setnames(dt, names(dt)[1], "timestamp")
-  }
-  dt[, timestamp := as.IDate(timestamp)]
-  dt[order(timestamp)]
-}
-
-read_features <- function(path) {
-  dt <- fread(path)
-  # Expect first col = date (from your Python saver)
-  if ("date" %in% names(dt)) {
-    setnames(dt, "date", "timestamp")
-  } else if (!"timestamp" %in% names(dt)) {
-    setnames(dt, names(dt)[1], "timestamp")
-  }
-  dt[, timestamp := as.IDate(timestamp)]
-  dt[order(timestamp)]
-}
-
-# ---------- Load & align ----------
-ret_path <- file.path(PRO, "BTC_returns_daily.csv")
-feat_path <- file.path(PRO, "ETH_graph_features_daily.csv")
-
-if (!file.exists(ret_path)) stop("Missing: ", ret_path)
-if (!file.exists(feat_path)) stop("Missing: ", feat_path)
-
-rdt  <- read_returns(ret_path)
-xdt  <- read_features(feat_path)
-
-# Keep needed cols
-rdt  <- rdt[, .(timestamp, ret)]
-xdt  <- xdt[, .(timestamp, n_nodes, n_edges, total_volume, avg_degree, avg_clustering)]
+# Keep relevant columns
+cols_features <- c("n_nodes", "n_edges", "total_volume", "avg_degree", "avg_clustering")
+req_cols <- c("timestamp", "ret", cols_features)
+missing <- setdiff(req_cols, names(dt))
+if (length(missing) > 0) stop("Missing columns: ", paste(missing, collapse = ", "))
 
 # Causal lag: use X_{t-1} to explain volatility at t
-setkey(rdt, timestamp); setkey(xdt, timestamp)
-xdt[, `:=`(
-  n_nodes_l1       = shift(n_nodes, 1L, type = "lag"),
-  n_edges_l1       = shift(n_edges, 1L, type = "lag"),
-  total_volume_l1  = shift(total_volume, 1L, type = "lag"),
-  avg_degree_l1    = shift(avg_degree, 1L, type = "lag"),
-  avg_clustering_l1= shift(avg_clustering, 1L, type = "lag")
-)]
-# Use only the lagged versions (cleanest)
-xlag <- xdt[, .(timestamp, n_nodes_l1, n_edges_l1, total_volume_l1, avg_degree_l1, avg_clustering_l1)]
+for (col in cols_features) {
+  dt[, paste0(col, "_l1") := shift(get(col), 1L, type = "lag")]
+}
 
-# Merge and clean
-dt <- merge(rdt, xlag, by = "timestamp", all = FALSE)
-dt <- dt[complete.cases(dt)]  # drop the first lagged NA and any gaps
+# Drop first NA (from lagging)
+dt <- dt[complete.cases(dt)]
 
 # Transform features: log1p + standardize
-feat_cols <- c("n_nodes_l1","n_edges_l1","total_volume_l1","avg_degree_l1","avg_clustering_l1")
-X_raw <- as.matrix(dt[, ..feat_cols])
-X_log <- log1p(pmax(X_raw, 0))   # ensure nonnegative before log1p
-X    <- scale(X_log)
+feat_cols_lag <- paste0(cols_features, "_l1")
+X_raw <- as.matrix(dt[, ..feat_cols_lag])
+X_log <- log1p(pmax(X_raw, 0))  # ensure nonnegative before log1p
+X <- scale(X_log)
 
 # Target series
 r <- dt$ret
@@ -111,6 +73,12 @@ sigma2_garch  <- sigma(fit0)^2
 sigma2_garchx <- sigma(fitx)^2
 rv            <- r^2
 
+qlike <- function(realized_var, pred_var, eps = 1e-12) {
+  rv <- pmax(realized_var, eps)
+  pv <- pmax(pred_var, eps)
+  mean(rv / pv - log(rv / pv) - 1)
+}
+
 ql_g <- qlike(rv, sigma2_garch)
 ql_x <- qlike(rv, sigma2_garchx)
 
@@ -123,7 +91,6 @@ show(fitx)
 # ---------- Save outputs ----------
 dir.create(PRO, showWarnings = FALSE, recursive = TRUE)
 
-# Variances + realized
 out_var <- data.table(
   timestamp = dt$timestamp,
   realized_var = rv,
@@ -132,9 +99,8 @@ out_var <- data.table(
 )
 fwrite(out_var, file.path(PRO, "true_garchx_variances.csv"))
 
-# Summary table
 summ <- data.table(
-  model = c("GARCH","GARCHX"),
+  model = c("GARCH", "GARCHX"),
   QLIKE = c(ql_g, ql_x),
   AIC   = c(infocriteria(fit0)["Akaike",1], infocriteria(fitx)["Akaike",1]),
   BIC   = c(infocriteria(fit0)["Bayes",1],  infocriteria(fitx)["Bayes",1])
